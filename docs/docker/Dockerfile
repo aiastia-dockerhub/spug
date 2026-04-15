@@ -1,7 +1,19 @@
 FROM centos:7.9.2009
 
 ENV TZ=Asia/Shanghai
-RUN yum install -y epel-release https://packages.endpointdev.com/rhel/7/os/x86_64/endpoint-repo.x86_64.rpm && yum install -y --setopt=tsflags=nodocs nginx redis mariadb-devel python36 python36-devel openldap-devel supervisor git gcc wget unzip net-tools sshpass rsync sshfs && yum -y clean all --enablerepo='*'
+
+# CentOS 7 已 EOL (2024-06-30)，切换到 vault 存档镜像源
+RUN sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/CentOS-*.repo && \
+    sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*.repo
+
+RUN yum install -y epel-release && \
+    sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/epel*.repo && \
+    sed -i 's|^#baseurl=http://download.fedoraproject.org/pub|baseurl=https://archive.fedoraproject.org/pub|g' /etc/yum.repos.d/epel*.repo && \
+    yum install -y --setopt=tsflags=nodocs \
+        nginx redis mariadb-devel python36 python36-devel \
+        openldap-devel supervisor git gcc wget unzip \
+        net-tools sshpass rsync sshfs && \
+    yum -y clean all --enablerepo='*'
 
 RUN pip3 install --no-cache-dir --upgrade pip -i https://mirrors.aliyun.com/pypi/simple/
 RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ \
@@ -15,8 +27,8 @@ RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ \
     channels_redis==2.4.1 \
     paramiko==2.11.0 \
     django-redis==4.10.0 \
-    requests==2.22.0 \
-    GitPython==3.0.8 \
+    requests==2.32.0 \
+    GitPython==3.1.41 \
     python-ldap==3.4.0 \
     openpyxl==3.0.3 \
     user_agents==2.2.0

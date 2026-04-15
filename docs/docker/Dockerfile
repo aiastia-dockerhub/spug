@@ -1,19 +1,17 @@
-FROM centos:7.9.2009
+FROM ubuntu:22.04
 
 ENV TZ=Asia/Shanghai
+ENV DEBIAN_FRONTEND=noninteractive
 
-# CentOS 7 已 EOL (2024-06-30)，切换到 vault 存档镜像源
-RUN sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/CentOS-*.repo && \
-    sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-*.repo
-
-RUN yum install -y epel-release && \
-    sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/epel*.repo && \
-    sed -i 's|^#baseurl=http://download.fedoraproject.org/pub|baseurl=https://archive.fedoraproject.org/pub|g' /etc/yum.repos.d/epel*.repo && \
-    yum install -y --setopt=tsflags=nodocs \
-        nginx redis mariadb-devel python36 python36-devel \
-        openldap-devel supervisor git gcc wget unzip \
-        net-tools sshpass rsync sshfs && \
-    yum -y clean all --enablerepo='*'
+# 安装系统依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nginx redis-server supervisor \
+    python3 python3-pip python3-dev \
+    default-libmysqlclient-dev libldap2-dev libsasl2-dev \
+    build-essential pkg-config \
+    git wget unzip net-tools sshpass rsync sshfs \
+    locales curl \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --no-cache-dir --upgrade pip -i https://mirrors.aliyun.com/pypi/simple/
 RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ \
@@ -33,16 +31,17 @@ RUN pip3 install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ \
     openpyxl==3.0.3 \
     user_agents==2.2.0
 
-RUN localedef -c -i en_US -f UTF-8 en_US.UTF-8
+RUN locale-gen en_US.UTF-8
 ENV LANG=en_US.UTF-8
 ENV LC_ALL=en_US.UTF-8
 RUN echo -e '\n# Source definitions\n. /etc/profile\n' >> /root/.bashrc
-RUN mkdir -p /data/repos
+RUN mkdir -p /data/repos /var/log/redis
+
 COPY ./docs/docker/init_spug /usr/bin/
 COPY ./docs/docker/nginx.conf /etc/nginx/
 COPY ./docs/docker/ssh_config /etc/ssh/
-COPY ./docs/docker/spug.ini /etc/supervisord.d/
-COPY ./docs/docker/redis.conf /etc/
+COPY ./docs/docker/spug.ini /etc/supervisor/conf.d/spug.conf
+COPY ./docs/docker/redis.conf /etc/redis.conf
 COPY ./docs/docker/entrypoint.sh /
 
 VOLUME /data

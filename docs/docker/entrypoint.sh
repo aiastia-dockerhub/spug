@@ -38,4 +38,4 @@ DATABASES = {
 EOF
 fi
 
-exec supervisord -c /etc/supervisord.conf
+exec supervisord -n

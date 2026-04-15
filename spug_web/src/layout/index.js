@@ -50,8 +50,8 @@ export default function () {
             {Routes}
             <Route component={NotFound}/>
           </Switch>
-          <Footer/>
         </Layout.Content>
+        <Footer/>
       </Layout>
     </Layout>
   )

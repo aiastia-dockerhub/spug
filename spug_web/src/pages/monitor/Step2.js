@@ -14,10 +14,12 @@ import lds from 'lodash';
 
 const modeOptions = [
   {label: '微信', 'value': '1'},
-  {label: '短信', 'value': '2', disabled: true},
-  {label: '钉钉', 'value': '3'},
+  {label: '短信', 'value': '2'},
+  {label: '电话', 'value': '6'},
   {label: '邮件', 'value': '4'},
+  {label: '钉钉', 'value': '3'},
   {label: '企业微信', 'value': '5'},
+  {label: '飞书', 'value': '7'},
 ];
 
 export default observer(function () {

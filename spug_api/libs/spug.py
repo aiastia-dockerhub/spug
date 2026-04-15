@@ -6,22 +6,30 @@ from apps.setting.utils import AppSetting
 from apps.notify.models import Notify
 from libs.mail import Mail
 from libs.utils import human_datetime
+from libs.push import push_server
 import requests
 import json
+import time
+import hmac
+import hashlib
+import base64
+from urllib.parse import urlencode
 
-spug_server = 'https://api.spug.cc'
-notify_source = 'monitor'
+
+def _gen_dd_sign(secret):
+    timestamp = str(int(time.time() * 1000))
+    string_to_sign = f'{timestamp}\n{secret}'
+    hmac_code = hmac.new(secret.encode('utf-8'), string_to_sign.encode('utf-8'), digestmod=hashlib.sha256).digest()
+    sign = base64.b64encode(hmac_code).decode('utf-8')
+    return timestamp, sign
 
 
-def send_login_wx_code(wx_token, code):
-    url = f'{spug_server}/apis/login/wx/'
-    spug_key = AppSetting.get_default('spug_key')
-    res = requests.post(url, json={'token': spug_key, 'user': wx_token, 'code': code}, timeout=30)
-    if res.status_code != 200:
-        raise Exception(f'status code: {res.status_code}')
-    res = res.json()
-    if res.get('error'):
-        raise Exception(res['error'])
+def _gen_fs_sign(secret):
+    timestamp = str(int(time.time()))
+    string_to_sign = f'{timestamp}\n{secret}'
+    hmac_code = hmac.new(string_to_sign.encode('utf-8'), b'', digestmod=hashlib.sha256).digest()
+    sign = base64.b64encode(hmac_code).decode('utf-8')
+    return timestamp, sign
 
 
 class Notification:
@@ -32,8 +40,7 @@ class Notification:
         self.target = target
         self.message = message
         self.duration = duration
-        self.spug_key = AppSetting.get_default('spug_key')
-        self.u_ids = []
+        self.spug_push_key = AppSetting.get_default('spug_push_key')
 
     @staticmethod
     def handle_request(url, data, mode=None):
@@ -60,20 +67,6 @@ class Notification:
             raise NotImplementedError
         Notify.make_system_notify('通知发送失败', f'返回数据：{res}')
 
-    def monitor_by_wx(self, users):
-        if not self.spug_key:
-            Notify.make_monitor_notify('发送报警信息失败', '未配置报警服务调用凭据，请在系统管理/系统设置/基本设置/调用凭据中配置。')
-            return
-        data = {
-            'token': self.spug_key,
-            'event': self.event,
-            'subject': f'{self.title} >> {self.target}',
-            'desc': self.message,
-            'remark': f'故障持续{self.duration}' if self.event == '2' else None,
-            'users': list(users)
-        }
-        self.handle_request(f'{spug_server}/apis/notify/wx/', data, 'spug')
-
     def monitor_by_email(self, users):
         mail_service = AppSetting.get_default('mail_service', {})
         body = [
@@ -89,17 +82,11 @@ class Notification:
             subject = f'{event_map[self.event]}-{self.title}'
             mail = Mail(**mail_service)
             mail.send_text_mail(users, subject, '\r\n'.join(body) + '\r\n\r\n自动发送，请勿回复。')
-        elif self.spug_key:
-            data = {
-                'token': self.spug_key,
-                'event': self.event,
-                'subject': self.title,
-                'body': '\r\n'.join(body),
-                'users': list(users)
-            }
-            self.handle_request(f'{spug_server}/apis/notify/mail/', data, 'spug')
         else:
-            Notify.make_monitor_notify('发送报警信息失败', '未配置报警服务调用凭据，请在系统管理/系统设置/报警服务设置中配置。')
+            Notify.make_monitor_notify(
+                '发送报警信息失败',
+                '未配置报警服务，请在系统管理/系统设置/报警服务设置中配置邮件服务。'
+            )
 
     def monitor_by_dd(self, users):
         texts = [
@@ -121,8 +108,40 @@ class Notification:
                 'isAtAll': True
             }
         }
-        for url in users:
+        for url, secret in users:
+            if secret:
+                timestamp, sign = _gen_dd_sign(secret)
+                url = f'{url}&{urlencode({"timestamp": timestamp, "sign": sign})}'
             self.handle_request(url, data, 'dd')
+
+    def monitor_by_fs(self, users):
+        title = '监控告警通知' if self.event == '1' else '告警恢复通知'
+        content = [
+            [{'tag': 'text', 'text': f'告警名称：{self.title}'}],
+            [{'tag': 'text', 'text': f'告警对象：{self.target}'}],
+            [{'tag': 'text', 'text': f'{"告警" if self.event == "1" else "恢复"}时间：{human_datetime()}'}],
+            [{'tag': 'text', 'text': f'告警描述：{self.message}'}],
+        ]
+        if self.event == '2':
+            content.append([{'tag': 'text', 'text': f'持续时间：{self.duration}'}])
+        content.append([{'tag': 'text', 'text': '来自 Spug运维平台'}])
+        for url, secret in users:
+            data = {
+                'msg_type': 'post',
+                'content': {
+                    'post': {
+                        'zh_cn': {
+                            'title': title,
+                            'content': content
+                        }
+                    }
+                }
+            }
+            if secret:
+                timestamp, sign = _gen_fs_sign(secret)
+                data['timestamp'] = timestamp
+                data['sign'] = sign
+            self.handle_request(url, data, 'fs')
 
     def monitor_by_qy_wx(self, users):
         color, title = ('warning', '监控告警通知') if self.event == '1' else ('info', '告警恢复通知')
@@ -144,30 +163,98 @@ class Notification:
         for url in users:
             self.handle_request(url, data, 'wx')
 
+    def monitor_by_spug_push(self, targets):
+        if not self.spug_push_key:
+            Notify.make_monitor_notify(
+                '发送报警信息失败',
+                '未绑定推送服务，请在系统管理/系统设置/推送服务设置中绑定推送助手账户。'
+            )
+            return
+        data = {
+            'source': 'monitor',
+            'token': self.spug_push_key,
+            'targets': list(targets),
+            'dataset': {
+                'title': self.title,
+                'target': self.target,
+                'message': self.message,
+                'duration': self.duration,
+                'event': self.event
+            }
+        }
+        self.handle_request(f'{push_server}/spug/message/', data, 'spug')
+
     def dispatch_monitor(self, modes):
-        self.u_ids = sum([json.loads(x.contacts) for x in Group.objects.filter(id__in=self.grp)], [])
+        u_ids, push_ids = [], []
+        for item in Group.objects.filter(id__in=self.grp):
+            for x in json.loads(item.contacts):
+                if isinstance(x, str) and '_' in x:
+                    push_ids.append(x)
+                else:
+                    u_ids.append(x)
+
+        targets = set()
         for mode in modes:
             if mode == '1':
-                users = set(x.wx_token for x in Contact.objects.filter(id__in=self.u_ids, wx_token__isnull=False))
-                if not users:
-                    Notify.make_monitor_notify('发送报警信息失败', '未找到可用的通知对象，请确保设置了相关报警联系人的微信Token。')
-                    continue
-                self.monitor_by_wx(users)
+                wx_mp_ids = set(x for x in push_ids if x.startswith('wx_mp_'))
+                targets.update(wx_mp_ids)
+            elif mode == '2':
+                sms_ids = set(x for x in push_ids if x.startswith('sms_'))
+                targets.update(sms_ids)
             elif mode == '3':
-                users = set(x.ding for x in Contact.objects.filter(id__in=self.u_ids, ding__isnull=False))
+                contacts = Contact.objects.filter(id__in=u_ids, ding__isnull=False)
+                users = []
+                for c in contacts:
+                    sec = None
+                    if c.secret:
+                        sec = json.loads(c.secret).get('ding')
+                    users.append((c.ding, sec))
                 if not users:
-                    Notify.make_monitor_notify('发送报警信息失败', '未找到可用的通知对象，请确保设置了相关报警联系人的钉钉。')
+                    Notify.make_monitor_notify(
+                        '发送报警信息失败',
+                        '未找到可用的通知对象，请确保设置了相关报警联系人的钉钉。'
+                    )
                     continue
                 self.monitor_by_dd(users)
             elif mode == '4':
-                users = set(x.email for x in Contact.objects.filter(id__in=self.u_ids, email__isnull=False))
+                mail_ids = set(x for x in push_ids if x.startswith('mail_'))
+                targets.update(mail_ids)
+                users = set(x.email for x in Contact.objects.filter(id__in=u_ids, email__isnull=False))
                 if not users:
-                    Notify.make_monitor_notify('发送报警信息失败', '未找到可用的通知对象，请确保设置了相关报警联系人的邮件地址。')
+                    if not mail_ids:
+                        Notify.make_monitor_notify(
+                            '发送报警信息失败',
+                            '未找到可用的通知对象，请确保设置了相关报警联系人的邮件地址。'
+                        )
                     continue
                 self.monitor_by_email(users)
             elif mode == '5':
-                users = set(x.qy_wx for x in Contact.objects.filter(id__in=self.u_ids, qy_wx__isnull=False))
+                users = set(x.qy_wx for x in Contact.objects.filter(id__in=u_ids, qy_wx__isnull=False))
                 if not users:
-                    Notify.make_monitor_notify('发送报警信息失败', '未找到可用的通知对象，请确保设置了相关报警联系人的企业微信。')
+                    Notify.make_monitor_notify(
+                        '发送报警信息失败',
+                        '未找到可用的通知对象，请确保设置了相关报警联系人的企业微信。'
+                    )
                     continue
                 self.monitor_by_qy_wx(users)
+            elif mode == '6':
+                voice_ids = set(x for x in push_ids if x.startswith('voice_'))
+                targets.update(voice_ids)
+            elif mode == '7':
+                contacts = Contact.objects.filter(id__in=u_ids, feishu__isnull=False)
+                users = []
+                for c in contacts:
+                    sec = None
+                    if c.secret:
+                        sec = json.loads(c.secret).get('feishu')
+                    users.append((c.feishu, sec))
+                if not users:
+                    Notify.make_monitor_notify(
+                        '发送报警信息失败',
+                        '未找到可用的通知对象，请确保设置了相关报警联系人的飞书。'
+                    )
+                    continue
+                self.monitor_by_fs(users)
+
+        if targets:
+            self.monitor_by_spug_push(targets)
